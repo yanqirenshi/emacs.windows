@@ -721,9 +721,13 @@ widthは最大行幅+左右罫線幅、heightは行数+2（上下罫線分）。
 
 (defun ew--render ()
   "グリッド内容をバッファに反映する。
-パディングマーカーはスキップし、全角文字の表示幅を正しく処理する。"
-  (let ((inhibit-read-only t)
-        (pos (point)))
+パディングマーカーはスキップし、全角文字の表示幅を正しく処理する。
+ウィンドウのスクロール位置を保持する。"
+  (let* ((inhibit-read-only t)
+         (win (selected-window))
+         ;; スクロール位置を行数・列数で保存
+         (start-line (count-lines (point-min) (window-start win)))
+         (hscroll (window-hscroll win)))
     (erase-buffer)
     (dotimes (i ew--canvas-rows)
       (let ((row-vec (aref ew--grid i)))
@@ -732,7 +736,11 @@ widthは最大行幅+左右罫線幅、heightは行数+2（上下罫線分）。
             (unless (eq cell ew--padding)
               (insert (if (characterp cell) cell ?\s))))))
       (insert "\n"))
-    (goto-char (min pos (point-max)))))
+    ;; スクロール位置を復元（行数ベース）
+    (goto-char (point-min))
+    (forward-line start-line)
+    (set-window-start win (point) t)
+    (set-window-hscroll win hscroll)))
 
 (defun ew--required-canvas-rows ()
   "全ボックスと接続線を収めるのに必要な最小キャンバス行数を返す。
