@@ -298,9 +298,193 @@ Unicodeスタイルではフォント実測値を使用する。"
       ew-line-chars-unicode
     ew-line-chars-ascii))
 
+(defun ew--box-bounds (box)
+  "BOXの境界を(top left bottom right)のplistで返す。物理列座標。"
+  (let ((r (ew--box-row box))
+        (c (ew--box-col box))
+        (tw (ew--box-total-physical-width box))
+        (th (+ (ew--box-height box) 2)))
+    (list :top r :left c :bottom (+ r th -1) :right (+ c tw -1))))
+
+(defun ew--align-col (c)
+  "列Cをhwの倍数にアラインして返す。"
+  (let ((hw (ew--border-h-width)))
+    (if (> hw 1) (* (/ c hw) hw) c)))
+
+(defun ew--route-connection (from-side to-side r1 c1 r2 c2 from-box to-box)
+  "ウェイポイントリストを計算する。
+FROM-SIDE/TO-SIDEは出発/到着辺、(R1,C1)/(R2,C2)はオフセット済み端点。
+FROM-BOX/TO-BOXはボックスオブジェクト。
+戻り値は ((r . c) ...) のリスト。最初と最後は(r1.c1)と(r2.c2)。"
+  (let* ((hw (ew--border-h-width))
+         (margin-h (* hw 2))  ;; 水平方向の迂回マージン
+         (margin-v 2)         ;; 垂直方向の迂回マージン
+         (fb (ew--box-bounds from-box))
+         (tb (ew--box-bounds to-box))
+         ;; 出発方向の判定用
+         (h-from (memq from-side '(left right)))
+         (h-to   (memq to-side   '(left right))))
+    (cond
+     ;; 完全に直線
+     ((and (= r1 r2) (or h-from h-to))
+      (list (cons r1 c1) (cons r2 c2)))
+     ((and (= c1 c2) (or (not h-from) (not h-to)))
+      (list (cons r1 c1) (cons r2 c2)))
+
+     ;; === 水平出発 → 水平到着 ===
+     ((and h-from h-to)
+      (let ((out-right (eq from-side 'right))
+            (in-left   (eq to-side 'left)))
+        (cond
+         ;; right→left: 順方向（fromが左側）
+         ((and out-right in-left (< c1 c2))
+          (let ((mc (ew--align-col (/ (+ c1 c2) 2))))
+            (list (cons r1 c1) (cons r1 mc) (cons r2 mc) (cons r2 c2))))
+         ;; left→right: 順方向（fromが右側）
+         ((and (not out-right) (not in-left) (> c1 c2))
+          (let ((mc (ew--align-col (/ (+ c1 c2) 2))))
+            (list (cons r1 c1) (cons r1 mc) (cons r2 mc) (cons r2 c2))))
+         ;; right→left: 逆方向（fromが右側）またはright→right, left→left等
+         (t
+          (let* ((mr (/ (+ r1 r2) 2))
+                 ;; 迂回列: 両ボックスの外側
+                 (esc-c1 (ew--align-col
+                           (if out-right
+                               (+ (max c1 (+ (plist-get fb :right) hw)) margin-h)
+                             (- (min c1 (- (plist-get fb :left) hw)) margin-h))))
+                 (esc-c2 (ew--align-col
+                           (if in-left
+                               (- (min c2 (- (plist-get tb :left) hw)) margin-h)
+                             (+ (max c2 (+ (plist-get tb :right) hw)) margin-h)))))
+            (if (= esc-c1 esc-c2)
+                ;; 同じ迂回列なら3セグメント
+                (list (cons r1 c1) (cons r1 esc-c1) (cons r2 esc-c1) (cons r2 c2))
+              ;; 異なる迂回列なら5セグメント
+              (list (cons r1 c1) (cons r1 esc-c1)
+                    (cons mr esc-c1) (cons mr esc-c2)
+                    (cons r2 esc-c2) (cons r2 c2))))))))
+
+     ;; === 垂直出発 → 垂直到着 ===
+     ((and (not h-from) (not h-to))
+      (let ((out-down (eq from-side 'bottom))
+            (in-top   (eq to-side 'top)))
+        (cond
+         ;; bottom→top: 順方向（fromが上側）
+         ((and out-down in-top (< r1 r2))
+          (let ((mr (/ (+ r1 r2) 2)))
+            (list (cons r1 c1) (cons mr c1) (cons mr c2) (cons r2 c2))))
+         ;; top→bottom: 順方向（fromが下側）
+         ((and (not out-down) (not in-top) (> r1 r2))
+          (let ((mr (/ (+ r1 r2) 2)))
+            (list (cons r1 c1) (cons mr c1) (cons mr c2) (cons r2 c2))))
+         ;; 逆方向またはbottom→bottom, top→top等
+         (t
+          (let* ((mc (ew--align-col (/ (+ c1 c2) 2)))
+                 (esc-r1 (if out-down
+                             (+ (max r1 (1+ (plist-get fb :bottom))) margin-v)
+                           (- (min r1 (1- (plist-get fb :top))) margin-v)))
+                 (esc-r2 (if in-top
+                             (- (min r2 (1- (plist-get tb :top))) margin-v)
+                           (+ (max r2 (1+ (plist-get tb :bottom))) margin-v))))
+            (if (= esc-r1 esc-r2)
+                (list (cons r1 c1) (cons esc-r1 c1) (cons esc-r1 c2) (cons r2 c2))
+              (list (cons r1 c1) (cons esc-r1 c1)
+                    (cons esc-r1 mc) (cons esc-r2 mc)
+                    (cons esc-r2 c2) (cons r2 c2))))))))
+
+     ;; === 水平出発 → 垂直到着 ===
+     (h-from
+      (let ((out-right (eq from-side 'right))
+            (in-top    (eq to-side 'top)))
+        (cond
+         ;; 順方向: 1折れで到達可能
+         ;; right→top: fromが左上（c1<c2 かつ r1<r2）
+         ;; right→bottom: fromが左下（c1<c2 かつ r1>r2）
+         ;; left→top: fromが右上（c1>c2 かつ r1<r2）
+         ;; left→bottom: fromが右下（c1>c2 かつ r1>r2）
+         ((and (if out-right (< c1 c2) (> c1 c2))
+               (if in-top (< r1 r2) (> r1 r2)))
+          (list (cons r1 c1) (cons r1 c2) (cons r2 c2)))
+         ;; 逆方向: 3折れ
+         (t
+          (let* ((esc-c (ew--align-col
+                          (if out-right
+                              (+ (max c1 (+ (plist-get fb :right) hw)) margin-h)
+                            (- (min c1 (- (plist-get fb :left) hw)) margin-h))))
+                 (esc-r (if in-top
+                            (- (min r2 (1- (plist-get tb :top))) margin-v)
+                          (+ (max r2 (1+ (plist-get tb :bottom))) margin-v))))
+            (list (cons r1 c1) (cons r1 esc-c)
+                  (cons esc-r esc-c) (cons esc-r c2)
+                  (cons r2 c2)))))))
+
+     ;; === 垂直出発 → 水平到着 ===
+     (t
+      (let ((out-down (eq from-side 'bottom))
+            (in-left  (eq to-side 'left)))
+        (cond
+         ;; 順方向: 1折れで到達可能
+         ;; bottom→left: fromが上で右（r1<r2 かつ c1>c2）
+         ;; bottom→right: fromが上で左（r1<r2 かつ c1<c2）
+         ;; top→left: fromが下で右（r1>r2 かつ c1>c2）
+         ;; top→right: fromが下で左（r1>r2 かつ c1<c2）
+         ((and (if out-down (< r1 r2) (> r1 r2))
+               (if in-left (> c1 c2) (< c1 c2)))
+          (list (cons r1 c1) (cons r2 c1) (cons r2 c2)))
+         ;; 逆方向: 3折れ
+         (t
+          (let* ((esc-r (if out-down
+                            (+ (max r1 (1+ (plist-get fb :bottom))) margin-v)
+                          (- (min r1 (1- (plist-get fb :top))) margin-v)))
+                 (esc-c (ew--align-col
+                          (if in-left
+                              (- (min c2 (- (plist-get tb :left) hw)) margin-h)
+                            (+ (max c2 (+ (plist-get tb :right) hw)) margin-h)))))
+            (list (cons r1 c1) (cons esc-r c1)
+                  (cons esc-r esc-c) (cons r2 esc-c)
+                  (cons r2 c2))))))))))
+
+(defun ew--draw-waypoints (waypoints lc)
+  "WAYPOINTSのリストに沿って接続線とLCの角文字を描画する。
+連続する2点間を水平/垂直の線で描画し、折れ点に角文字を配置する。"
+  (let ((ch-h (plist-get lc :h))
+        (ch-v (plist-get lc :v))
+        (pts waypoints))
+    ;; 各セグメントを描画
+    (while (cdr pts)
+      (let ((p1 (car pts))
+            (p2 (cadr pts)))
+        (if (= (car p1) (car p2))
+            ;; 水平セグメント
+            (ew--draw-h-line (car p1) (cdr p1) (cdr p2) ch-h)
+          ;; 垂直セグメント
+          (ew--draw-v-line (cdr p1) (car p1) (car p2) ch-v)))
+      (setq pts (cdr pts)))
+    ;; 折れ点に角文字を配置（最初と最後のポイントは除く）
+    (let ((pts waypoints))
+      (while (cddr pts)
+        (let* ((prev (car pts))
+               (curr (cadr pts))
+               (next (caddr pts))
+               ;; prevからcurrへの方向
+               (from-dir (cond
+                          ((< (cdr prev) (cdr curr)) 'from-left)
+                          ((> (cdr prev) (cdr curr)) 'from-right)
+                          ((< (car prev) (car curr)) 'from-up)
+                          (t                          'from-down)))
+               ;; currからnextへの方向
+               (to-dir (cond
+                        ((< (cdr curr) (cdr next)) 'to-right)
+                        ((> (cdr curr) (cdr next)) 'to-left)
+                        ((< (car curr) (car next)) 'to-down)
+                        (t                          'to-up))))
+          (ew--grid-set (car curr) (cdr curr)
+            (ew--corner-char lc from-dir to-dir)))
+        (setq pts (cdr pts))))))
+
 (defun ew--draw-connection (conn)
   "接続線CONNをグリッドに描画する。
-接続元辺の中点から接続先辺の中点へ、3セグメントの折れ線で描画。
+ボックスの位置関係に応じて最大5回折れのルーティングを自動選択する。
 描画順序: 接続線→ボックスの順なので、ボックスと重なる部分はボックスが上書きする。"
   (let* ((from-box (ew--find-box (ew--connection-from-id conn)))
          (to-box   (ew--find-box (ew--connection-to-id conn))))
@@ -311,11 +495,8 @@ Unicodeスタイルではフォント実測値を使用する。"
              (to-pt   (ew--box-anchor to-box   to-side))
              (r1 (car from-pt)) (c1 (cdr from-pt))
              (r2 (car to-pt))   (c2 (cdr to-pt))
-             (lc (ew--line-chars))
-             (ch-h (plist-get lc :h))
-             (ch-v (plist-get lc :v)))
-        ;; ボックスの辺から外側にオフセット（罫線の実表示幅分）
-        ;; 水平座標はhwの倍数にアラインして全角罫線の隙間を防ぐ
+             (lc (ew--line-chars)))
+        ;; ボックスの辺から外側にオフセット
         (let ((hw (ew--border-h-width)))
           (cl-case from-side
             (right  (cl-incf c1 hw))
@@ -331,47 +512,11 @@ Unicodeスタイルではフォント実測値を使用する。"
           (when (> hw 1)
             (setq c1 (* (/ c1 hw) hw))
             (setq c2 (* (/ c2 hw) hw)))
-          ;; ルーティング戦略:
-          ;; 接続元がleft/right → 水平→垂直→水平 (中間col)
-          ;; 接続元がtop/bottom → 垂直→水平→垂直 (中間row)
-          (cond
-           ;; 完全に水平
-           ((= r1 r2)
-            (ew--draw-h-line r1 c1 c2 ch-h))
-           ;; 完全に垂直
-           ((= c1 c2)
-            (ew--draw-v-line c1 r1 r2 ch-v))
-           ;; 水平出発 (left/right): from側の列で即座に垂直→水平
-           ;; from側の列c1で縦に曲がり、to側の行r2で水平にc2まで進む
-           ((memq from-side '(left right))
-            (ew--draw-v-line c1 r1 r2 ch-v)
-            (ew--draw-h-line r2 c1 c2 ch-h)
-            ;; 角1: (r1, c1) — 垂直線のfrom端（直角に曲がる点）
-            (ew--grid-set r1 c1
-              (ew--corner-char lc
-                (if (> c1 (cdr from-pt)) 'from-left 'from-right)
-                (if (> r2 r1) 'to-down   'to-up)))
-            ;; 角2: (r2, c1) — 垂直線のto端（水平に折れる点）
-            (ew--grid-set r2 c1
-              (ew--corner-char lc
-                (if (> r2 r1) 'from-up   'from-down)
-                (if (> c2 c1) 'to-right  'to-left))))
-           ;; 垂直出発 (top/bottom): from側で即座に水平→垂直
-           ;; from側の行で水平に曲がり、to側に縦線を降ろす
-           (t
-            (ew--draw-h-line r1 c1 c2 ch-h)
-            (ew--draw-v-line c2 r1 r2 ch-v)
-            ;; 角1: (r1, c1) — 水平線のfrom端（直角に曲がる点）
-            (ew--grid-set r1 c1
-              (ew--corner-char lc
-                (if (> r1 (car from-pt)) 'from-up 'from-down)
-                (if (> c2 c1) 'to-right  'to-left)))
-            ;; 角2: (r1, c2) — 水平線のto端（垂直に折れる点）
-            (ew--grid-set r1 c2
-              (ew--corner-char lc
-                (if (> c2 c1) 'from-left 'from-right)
-                (if (> r2 r1) 'to-down   'to-up))))))
-        ))))
+          ;; ルート計算→描画
+          (let ((waypoints (ew--route-connection
+                            from-side to-side r1 c1 r2 c2
+                            from-box to-box)))
+            (ew--draw-waypoints waypoints lc)))))))
 
 (defun ew--draw-connection-arrow (conn)
   "接続線CONNの矢印を描画する（ボックス描画後に呼ぶ）。
@@ -482,8 +627,57 @@ TO-DIR: to-right, to-left, to-down, to-up
       (insert "\n"))
     (goto-char (min pos (point-max)))))
 
+(defun ew--required-canvas-rows ()
+  "全ボックスと接続線を収めるのに必要な最小キャンバス行数を返す。
+最低30行は確保し、余白として下に3行追加する。"
+  (let ((max-row 0))
+    ;; 全ボックスの下端を計算
+    (dolist (box ew--boxes)
+      (let ((bottom (+ (ew--box-row box) (ew--box-height box) 2)))
+        (setq max-row (max max-row bottom))))
+    ;; 接続線の矢印位置も考慮（to側ボックスの1行外側）
+    (dolist (conn ew--connections)
+      (let ((to-box (ew--find-box (ew--connection-to-id conn))))
+        (when to-box
+          (let* ((to-side (ew--connection-to-side conn))
+                 (anchor-r (car (ew--box-anchor to-box to-side)))
+                 (arrow-r (cl-case to-side
+                            (top    (- anchor-r 1))
+                            (bottom (+ anchor-r 1))
+                            (t      anchor-r))))
+            (setq max-row (max max-row (1+ arrow-r)))))))
+    ;; 最低30行 + 余白3行
+    (max 30 (+ max-row 3))))
+
+(defun ew--required-canvas-cols ()
+  "全ボックスと接続線を収めるのに必要な最小キャンバス列数を返す。
+最低80列（全角罫線時は160列）は確保し、余白として右にhw*4列追加する。"
+  (let ((max-col 0)
+        (hw (ew--border-h-width)))
+    ;; 全ボックスの右端を計算
+    (dolist (box ew--boxes)
+      (let ((right-col (+ (ew--box-col box) (ew--box-total-physical-width box))))
+        (setq max-col (max max-col right-col))))
+    ;; 接続線の矢印位置も考慮（to側ボックスのhw列外側）
+    (dolist (conn ew--connections)
+      (let ((to-box (ew--find-box (ew--connection-to-id conn))))
+        (when to-box
+          (let* ((to-side (ew--connection-to-side conn))
+                 (anchor-c (cdr (ew--box-anchor to-box to-side)))
+                 (arrow-c (cl-case to-side
+                            (left  (- anchor-c hw))
+                            (right (+ anchor-c hw))
+                            (t     anchor-c))))
+            (setq max-col (max max-col (+ arrow-c hw)))))))
+    ;; 最低80列（全角時160列）+ 余白
+    (max (if (> hw 1) 160 80) (+ max-col (* hw 4)))))
+
 (defun ew--redraw ()
-  "グリッド初期化→接続線→ボックス→矢印→バッファ反映の一括実行。"
+  "グリッド初期化→接続線→ボックス→矢印→バッファ反映の一括実行。
+キャンバスサイズを内容に合わせて自動調整する。"
+  ;; キャンバスサイズを必要に応じて拡張・縮小
+  (setq ew--canvas-rows (ew--required-canvas-rows))
+  (setq ew--canvas-cols (ew--required-canvas-cols))
   (ew--init-grid)
   (ew--draw-all-connections)       ;; 1. 接続線（線のみ）
   (ew--draw-all)                   ;; 2. ボックス（接続線の上に描画）
@@ -527,13 +721,12 @@ TO-DIR: to-right, to-left, to-down, to-up
 ;;;; ============================================================
 
 (defun ew--clamp-box-position (box)
-  "BOXの位置をキャンバス範囲内にクランプする。物理幅を考慮。
-列位置をhwの倍数にスナップして全角罫線のアライメントを保つ。"
-  (let* ((hw (ew--border-h-width))
-         (max-row (- ew--canvas-rows (ew--box-height box) 2))
-         (max-col (- ew--canvas-cols (ew--box-total-physical-width box))))
-    (setf (ew--box-row box) (max 0 (min max-row (ew--box-row box))))
-    (setf (ew--box-col box) (max 0 (min max-col (ew--box-col box))))
+  "BOXの位置をクランプする。
+行方向・列方向とも上端/左端(0)のみクランプし、下/右方向は無制限。
+キャンバスは再描画時に自動拡張・縮小される。hwの倍数にスナップ。"
+  (let ((hw (ew--border-h-width)))
+    (setf (ew--box-row box) (max 0 (ew--box-row box)))
+    (setf (ew--box-col box) (max 0 (ew--box-col box)))
     ;; 列位置をhwの倍数にスナップ（全角罫線のアライメント）
     (when (> hw 1)
       (setf (ew--box-col box) (* (/ (ew--box-col box) hw) hw)))))
@@ -611,10 +804,7 @@ TO-DIR: to-right, to-left, to-down, to-up
                          (phys-inner (- new-br-col box-c cw))
                          (new-w (max min-w (/ phys-inner hw)))
                          (new-h (max min-h (- new-br-row box-r 1))))
-                    ;; キャンバス範囲内にクランプ
-                    (let ((max-w (/ (- ew--canvas-cols box-c (* 2 cw)) hw)))
-                      (setq new-w (min new-w max-w)))
-                    (setq new-h (min new-h (- ew--canvas-rows box-r 2)))
+                    ;; 幅・高さとも無制限（キャンバスが自動拡張される）
                     (setf (ew--box-width box) new-w)
                     (setf (ew--box-height box) new-h)
                     (ew--redraw)))))
