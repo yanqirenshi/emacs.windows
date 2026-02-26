@@ -744,20 +744,23 @@ TO-DIR: to-right, to-left, to-down, to-up
          (>= col (- br-col 2)) (<= col br-col))))
 
 (defun ew--mouse-drag (event)
-  "マウスドラッグでボックスを移動またはリサイズする。
-右下角付近をドラッグするとリサイズ、それ以外は移動。"
+  "マウスドラッグでボックスを移動・リサイズ、または空白部分でビューポートをパンする。
+右下角付近をドラッグするとリサイズ、ボックス上は移動、空白部分はパン。"
   (interactive "e")
   (let* ((posn (event-start event))
          (rc   (posn-col-row posn))
          (start-col (car rc))
          (start-row (cdr rc))
          (box  (ew--box-at start-row start-col)))
-    (when box
-      (ew--push-undo)
-      (ew--bring-to-front box)
-      (if (ew--resize-region-p box start-row start-col)
-          (ew--do-resize box start-row start-col)
-        (ew--do-move box start-row start-col)))))
+    (if box
+        (progn
+          (ew--push-undo)
+          (ew--bring-to-front box)
+          (if (ew--resize-region-p box start-row start-col)
+              (ew--do-resize box start-row start-col)
+            (ew--do-move box start-row start-col)))
+      ;; 空白部分: ビューポートパン
+      (ew--do-pan start-row start-col))))
 
 (defun ew--do-move (box start-row start-col)
   "BOXをドラッグ移動する。START-ROW/START-COLはドラッグ開始位置。"
@@ -810,6 +813,58 @@ TO-DIR: to-right, to-left, to-down, to-up
                     (ew--redraw)))))
              (t (throw 'done nil)))))))))
 
+(defun ew--ensure-buffer-lines (needed-lines)
+  "バッファの行数がNEEDED-LINES以上になるよう空行を追加する。"
+  (let ((inhibit-read-only t)
+        (current-lines (count-lines (point-min) (point-max))))
+    (when (< current-lines needed-lines)
+      (save-excursion
+        (goto-char (point-max))
+        (dotimes (_i (- needed-lines current-lines))
+          (insert "\n"))))))
+
+(defun ew--do-pan (start-row start-col)
+  "空白領域のドラッグでビューポートをパン（スクロール）する。
+START-ROW/START-COLはドラッグ開始時のカーソル位置。
+マウスの移動差分だけウィンドウのスクロール位置を逆方向に動かす。
+下方向にスクロールする際、バッファ末尾を超える場合は空行を追加する。"
+  (let ((prev-row start-row)
+        (prev-col start-col)
+        (win (selected-window)))
+    (track-mouse
+      (catch 'done
+        (while t
+          (let ((ev (read-event)))
+            (cond
+             ((mouse-movement-p ev)
+              (let* ((p   (event-start ev))
+                     (rc2 (posn-col-row p)))
+                (when rc2
+                  (let* ((cur-col (car rc2))
+                         (cur-row (cdr rc2))
+                         (dr (- prev-row cur-row))
+                         (dc (- prev-col cur-col)))
+                    ;; 垂直スクロール
+                    (when (/= dr 0)
+                      ;; 下方向スクロール時、バッファが足りなければ空行を追加
+                      (when (> dr 0)
+                        (let ((visible-end (+ (count-lines (point-min) (window-start win))
+                                              (window-body-height win)
+                                              dr)))
+                          (ew--ensure-buffer-lines visible-end)))
+                      (let* ((ws (window-start win))
+                             (new-start (save-excursion
+                                          (goto-char ws)
+                                          (forward-line dr)
+                                          (point))))
+                        (set-window-start win (max (point-min) new-start))))
+                    ;; 水平スクロール
+                    (when (/= dc 0)
+                      (set-window-hscroll win
+                        (max 0 (+ (window-hscroll win) dc))))
+                    (setq prev-row cur-row
+                          prev-col cur-col)))))
+             (t (throw 'done nil)))))))))
 
 ;;;; ============================================================
 ;;;; undo/redo（スナップショットベース）
@@ -1157,7 +1212,7 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
   (interactive)
   (message (concat
             "【操作】 "
-            "ドラッグ:移動 右下ドラッグ:リサイズ ダブルクリック:ラベル編集 | "
+            "ドラッグ:移動 右下ドラッグ:リサイズ 空白ドラッグ:パン ダブルクリック:ラベル編集 | "
             "a:追加 d:削除 e:ラベル | "
             "c:接続 x:接続削除 | "
             "u:undo r:redo | "
