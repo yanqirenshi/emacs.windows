@@ -99,6 +99,15 @@
 (defvar-local ew--file-name nil
   "現在開いているファイル名。")
 
+(defvar-local ew--selected-box nil
+  "選択中のボックスID。nilなら非選択。")
+
+(defvar-local ew--inspector-row nil
+  "インスペクタを表示する行位置。")
+
+(defvar-local ew--inspector-col nil
+  "インスペクタを表示する列位置。")
+
 ;;;; ============================================================
 ;;;; 全角幅対応
 ;;;; ============================================================
@@ -609,6 +618,104 @@ TO-DIR: to-right, to-left, to-down, to-up
     (ew--draw-connection-arrow conn)))
 
 ;;;; ============================================================
+;;;; インスペクタ描画
+;;;; ============================================================
+
+(defun ew--inspector-content (box)
+  "BOXのインスペクタ表示内容を行のリストで返す。
+各行は (key . text) の形式。keyは編集用キー、textは表示文字列。"
+  (list
+   (cons nil (format " %s" (ew--box-id box)))
+   (cons ?1 (format " 1: ラベル: %s" (ew--box-label box)))
+   (cons ?2 (format " 2: 行: %d" (ew--box-row box)))
+   (cons ?3 (format " 3: 列: %d" (ew--box-col box)))
+   (cons ?4 (format " 4: 幅: %d" (ew--box-width box)))
+   (cons ?5 (format " 5: 高さ: %d" (ew--box-height box)))
+   (cons ?6 (format " 6: Z: %d" (ew--box-z-order box)))))
+
+(defun ew--inspector-panel-size (lines)
+  "LINESの内容に基づくインスペクタパネルのサイズを(width . height)で返す。
+widthは最大行幅+左右罫線幅、heightは行数+2（上下罫線分）。
+罫線文字が全角の場合、内部幅を全角幅の倍数に切り上げる。"
+  (let* ((max-width 0)
+         (border-w (char-width ?│))  ;; 縦罫線の幅
+         (h-w (char-width ?─)))      ;; 水平罫線の幅
+    (dolist (line lines)
+      (setq max-width (max max-width (string-width (cdr line)))))
+    ;; 内部幅を水平罫線幅の倍数に切り上げ
+    (let ((inner-w (* (ceiling (float max-width) h-w) h-w)))
+      (cons (+ inner-w (* 2 border-w)) (+ (length lines) 2)))))
+
+(defun ew--draw-inspector ()
+  "選択中ボックスのインスペクタをグリッドに描画する。
+クリック位置を起点に表示。全角罫線の幅を正しく考慮する。"
+  (when (and ew--selected-box ew--inspector-row ew--inspector-col)
+    (let ((box (ew--find-box ew--selected-box)))
+      (when box
+        (let* ((lines (ew--inspector-content box))
+               (panel-size (ew--inspector-panel-size lines))
+               (panel-w (car panel-size))  ;; 表示幅（string-width）
+               (panel-h (cdr panel-size))
+               ;; インスペクタの配置位置（クリック位置を起点、全角幅にアライン）
+               (insp-row ew--inspector-row)
+               (hw (char-width ?─))
+               (insp-col (if (> hw 1)
+                             (* (/ ew--inspector-col hw) hw)
+                           ew--inspector-col)))
+          ;; 描画用の罫線文字と幅
+          (let* ((tl ?┌) (tr ?┐) (bl ?└) (br ?┘) (h ?─) (v ?│)
+                 (corner-w (char-width tl))  ;; 角文字の幅
+                 (h-w (char-width h))        ;; 水平罫線の幅
+                 (v-w (char-width v))        ;; 垂直罫線の幅
+                 ;; 内部の表示幅（左右罫線を除く）
+                 (inner-w (- panel-w (* 2 v-w)))
+                 ;; 水平罫線の数
+                 (h-count (/ inner-w h-w)))
+            ;; まずインスペクタ領域を空白でクリア（ボックスとの重なりを防ぐ）
+            (dotimes (row-off panel-h)
+              (let ((r (+ insp-row row-off)))
+                (dotimes (col-off panel-w)
+                  (ew--grid-set r (+ insp-col col-off) ?\s))))
+            ;; 上辺: 角 + 水平罫線 + 角
+            (let ((col insp-col))
+              (ew--grid-set insp-row col tl)
+              (setq col (+ col corner-w))
+              (dotimes (_i h-count)
+                (ew--grid-set insp-row col h)
+                (setq col (+ col h-w)))
+              (ew--grid-set insp-row col tr))
+            ;; 内容行
+            (let ((row-idx 1))
+              (dolist (line lines)
+                (let ((text (cdr line))
+                      (r (+ insp-row row-idx)))
+                  ;; 左罫線
+                  (ew--grid-set r insp-col v)
+                  ;; テキスト内容（1文字ずつ）
+                  (let ((col (+ insp-col v-w)))
+                    (dotimes (i (length text))
+                      (let ((ch (aref text i)))
+                        (ew--grid-set r col ch)
+                        (setq col (+ col (max 1 (char-width ch))))))
+                    ;; 残りを空白で埋める（右罫線の位置まで）
+                    (let ((right-border-col (+ insp-col v-w inner-w)))
+                      (while (< col right-border-col)
+                        (ew--grid-set r col ?\s)
+                        (setq col (1+ col)))
+                      ;; 右罫線
+                      (ew--grid-set r right-border-col v)))
+                  (setq row-idx (1+ row-idx)))))
+            ;; 下辺: 角 + 水平罫線 + 角
+            (let ((bottom-row (+ insp-row panel-h -1))
+                  (col insp-col))
+              (ew--grid-set bottom-row col bl)
+              (setq col (+ col corner-w))
+              (dotimes (_i h-count)
+                (ew--grid-set bottom-row col h)
+                (setq col (+ col h-w)))
+              (ew--grid-set bottom-row col br))))))))
+
+;;;; ============================================================
 ;;;; レンダリング
 ;;;; ============================================================
 
@@ -673,7 +780,7 @@ TO-DIR: to-right, to-left, to-down, to-up
     (max (if (> hw 1) 160 80) (+ max-col (* hw 4)))))
 
 (defun ew--redraw ()
-  "グリッド初期化→接続線→ボックス→矢印→バッファ反映の一括実行。
+  "グリッド初期化→接続線→ボックス→矢印→インスペクタ→バッファ反映の一括実行。
 キャンバスサイズを内容に合わせて自動調整する。"
   ;; キャンバスサイズを必要に応じて拡張・縮小
   (setq ew--canvas-rows (ew--required-canvas-rows))
@@ -682,6 +789,7 @@ TO-DIR: to-right, to-left, to-down, to-up
   (ew--draw-all-connections)       ;; 1. 接続線（線のみ）
   (ew--draw-all)                   ;; 2. ボックス（接続線の上に描画）
   (ew--draw-all-connection-arrows) ;; 3. 矢印（ボックスの辺の上に描画）
+  (ew--draw-inspector)             ;; 4. インスペクタ（最前面に描画）
   (ew--render))
 
 ;;;; ============================================================
@@ -827,10 +935,12 @@ Ctrl+ドラッグでボックスを移動・リサイズする。"
   "空白領域のドラッグでビューポートをパン（スクロール）する。
 START-ROW/START-COLはドラッグ開始時のカーソル位置。
 マウスの移動差分だけウィンドウのスクロール位置を逆方向に動かす。
-下方向にスクロールする際、バッファ末尾を超える場合は空行を追加する。"
+下方向にスクロールする際、バッファ末尾を超える場合は空行を追加する。
+ドラッグせずにリリースした場合はクリックとして処理する。"
   (let ((prev-row start-row)
         (prev-col start-col)
-        (win (selected-window)))
+        (win (selected-window))
+        (moved nil))  ;; 実際に移動したかどうか
     (track-mouse
       (catch 'done
         (while t
@@ -844,6 +954,9 @@ START-ROW/START-COLはドラッグ開始時のカーソル位置。
                          (cur-row (cdr rc2))
                          (dr (- prev-row cur-row))
                          (dc (- prev-col cur-col)))
+                    ;; 移動があったかチェック
+                    (when (or (/= dr 0) (/= dc 0))
+                      (setq moved t))
                     ;; 垂直スクロール
                     (when (/= dr 0)
                       ;; 下方向スクロール時、バッファが足りなければ空行を追加
@@ -864,7 +977,108 @@ START-ROW/START-COLはドラッグ開始時のカーソル位置。
                         (max 0 (+ (window-hscroll win) dc))))
                     (setq prev-row cur-row
                           prev-col cur-col)))))
-             (t (throw 'done nil)))))))))
+             (t (throw 'done nil)))))))
+    ;; ドラッグしなかった場合はクリックとして処理
+    (unless moved
+      (ew--handle-click start-row start-col))))
+
+;;;; ============================================================
+;;;; インスペクタ操作
+;;;; ============================================================
+
+(defun ew--handle-click (row col)
+  "座標(ROW, COL)でのクリック処理を行う。
+ボックス上をクリック → そのボックスを選択しインスペクタ表示
+空白をクリック → 選択解除、インスペクタ非表示"
+  (let ((box (ew--box-at row col)))
+    (if box
+        (progn
+          (setq ew--selected-box (ew--box-id box))
+          ;; クリック位置をインスペクタの表示位置として記録
+          (setq ew--inspector-row row)
+          (setq ew--inspector-col col)
+          (ew--redraw)
+          (message "ボックス '%s' を選択 (1-6:編集 ESC:解除)"
+                   (ew--box-id box)))
+      ;; 空白クリック → 選択解除
+      (when ew--selected-box
+        (setq ew--selected-box nil)
+        (setq ew--inspector-row nil)
+        (setq ew--inspector-col nil)
+        (ew--redraw)
+        (message "選択解除")))))
+
+(defun ew--mouse-click (event)
+  "マウスクリックでボックス選択/インスペクタ表示を切り替える。"
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (rc   (posn-col-row posn))
+         (col  (car rc))
+         (row  (cdr rc)))
+    (ew--handle-click row col)))
+
+(defun ew-deselect-box ()
+  "ボックスの選択を解除する。"
+  (interactive)
+  (when ew--selected-box
+    (setq ew--selected-box nil)
+    (setq ew--inspector-row nil)
+    (setq ew--inspector-col nil)
+    (ew--redraw)
+    (message "選択解除")))
+
+(defun ew--edit-inspector-property (key)
+  "KEYに対応するプロパティをミニバッファで編集する。
+KEY: 1=ラベル, 2=行, 3=列, 4=幅, 5=高さ, 6=z-order"
+  (when ew--selected-box
+    (let ((box (ew--find-box ew--selected-box)))
+      (when box
+        (ew--push-undo)
+        (pcase key
+          (?1  ;; ラベル
+           (let* ((old (ew--box-label box))
+                  (new (read-string (format "ラベル [%s]: " old) nil nil old))
+                  (max-len (ew--box-inner-physical-width box))
+                  (trimmed (if (> (string-width new) max-len)
+                               (truncate-string-to-width new max-len)
+                             new)))
+             (setf (ew--box-label box) trimmed)
+             (message "ラベルを '%s' に変更" trimmed)))
+          (?2  ;; 行
+           (let* ((old (ew--box-row box))
+                  (new (read-number (format "行 [%d]: " old) old)))
+             (setf (ew--box-row box) (max 0 new))
+             (ew--clamp-box-position box)
+             (message "行を %d に変更" (ew--box-row box))))
+          (?3  ;; 列
+           (let* ((old (ew--box-col box))
+                  (new (read-number (format "列 [%d]: " old) old)))
+             (setf (ew--box-col box) (max 0 new))
+             (ew--clamp-box-position box)
+             (message "列を %d に変更" (ew--box-col box))))
+          (?4  ;; 幅
+           (let* ((old (ew--box-width box))
+                  (new (read-number (format "幅 [%d]: " old) old)))
+             (setf (ew--box-width box) (max 4 new))
+             (message "幅を %d に変更" (ew--box-width box))))
+          (?5  ;; 高さ
+           (let* ((old (ew--box-height box))
+                  (new (read-number (format "高さ [%d]: " old) old)))
+             (setf (ew--box-height box) (max 1 new))
+             (message "高さを %d に変更" (ew--box-height box))))
+          (?6  ;; z-order
+           (let* ((old (ew--box-z-order box))
+                  (new (read-number (format "Z-order [%d]: " old) old)))
+             (setf (ew--box-z-order box) new)
+             (message "Z-orderを %d に変更" new))))
+        (ew--redraw)))))
+
+(defun ew-edit-property-1 () "ラベルを編集。" (interactive) (ew--edit-inspector-property ?1))
+(defun ew-edit-property-2 () "行を編集。" (interactive) (ew--edit-inspector-property ?2))
+(defun ew-edit-property-3 () "列を編集。" (interactive) (ew--edit-inspector-property ?3))
+(defun ew-edit-property-4 () "幅を編集。" (interactive) (ew--edit-inspector-property ?4))
+(defun ew-edit-property-5 () "高さを編集。" (interactive) (ew--edit-inspector-property ?5))
+(defun ew-edit-property-6 () "Z-orderを編集。" (interactive) (ew--edit-inspector-property ?6))
 
 ;;;; ============================================================
 ;;;; undo/redo（スナップショットベース）
@@ -1212,7 +1426,8 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
   (interactive)
   (message (concat
             "【操作】 "
-            "ドラッグ:パン C-ドラッグ:移動 C-右下ドラッグ:リサイズ ダブルクリック:ラベル編集 | "
+            "クリック:選択 ドラッグ:パン C-ドラッグ:移動 C-右下ドラッグ:リサイズ | "
+            "1-6:プロパティ編集 ESC:選択解除 | "
             "a:追加 d:削除 e:ラベル | "
             "c:接続 x:接続削除 | "
             "u:undo r:redo | "
@@ -1229,6 +1444,7 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
     (define-key map [down-mouse-1] #'ew--mouse-drag)
     (define-key map [C-down-mouse-1] #'ew--mouse-drag)
     (define-key map [C-mouse-1] #'ignore)  ;; Buffer Menuポップアップを抑制
+    (define-key map [mouse-1] #'ew--mouse-click)  ;; クリックでインスペクタ表示
     (define-key map [double-mouse-1] #'ew-edit-label-mouse)
     ;; ボックス操作
     (define-key map (kbd "a") #'ew-add-box-interactive)
@@ -1237,6 +1453,16 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
     ;; 接続線操作
     (define-key map (kbd "c") #'ew-add-connection-interactive)
     (define-key map (kbd "x") #'ew-remove-connection-interactive)
+    ;; インスペクタ編集 (数字キー)
+    (define-key map (kbd "1") #'ew-edit-property-1)
+    (define-key map (kbd "2") #'ew-edit-property-2)
+    (define-key map (kbd "3") #'ew-edit-property-3)
+    (define-key map (kbd "4") #'ew-edit-property-4)
+    (define-key map (kbd "5") #'ew-edit-property-5)
+    (define-key map (kbd "6") #'ew-edit-property-6)
+    ;; 選択解除
+    (define-key map (kbd "<escape>") #'ew-deselect-box)
+    (define-key map [escape] #'ew-deselect-box)
     ;; undo/redo
     (define-key map (kbd "u") #'ew-undo)
     (define-key map (kbd "r") #'ew-redo)
@@ -1263,6 +1489,9 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
   (setq ew--undo-stack nil)
   (setq ew--redo-stack nil)
   (setq ew--file-name nil)
+  (setq ew--selected-box nil)  ;; インスペクタ選択状態をリセット
+  (setq ew--inspector-row nil)
+  (setq ew--inspector-col nil)
   (setq ew--actual-border-width nil)  ;; フォント測定をリセット
   ;; 罫線の実表示幅に応じてキャンバスを拡張
   (setq ew--canvas-cols (if (> (ew--border-h-width) 1) 160 80))
@@ -1289,7 +1518,7 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
     (ew-add-connection 'conn-ab 'box-a 'box-b 'right 'left)
     (ew-add-connection 'conn-bc 'box-b 'box-c 'bottom 'top)
     (ew--redraw)
-    (message "?:ヘルプ | ドラッグ:移動 a:追加 d:削除 c:接続 u:undo r:redo C-x C-s:保存 C-x C-f:読込")))
+    (message "?:ヘルプ | クリック:選択 C-ドラッグ:移動 1-6:編集 a:追加 d:削除 c:接続 u:undo")))
 
 (provide 'emacs-windows)
 
