@@ -744,14 +744,15 @@ TO-DIR: to-right, to-left, to-down, to-up
          (>= col (- br-col 2)) (<= col br-col))))
 
 (defun ew--mouse-drag (event)
-  "マウスドラッグでボックスを移動・リサイズ、または空白部分でビューポートをパンする。
-右下角付近をドラッグするとリサイズ、ボックス上は移動、空白部分はパン。"
+  "マウスドラッグでビューポートをパンする。
+Ctrl+ドラッグでボックスを移動・リサイズする。"
   (interactive "e")
   (let* ((posn (event-start event))
          (rc   (posn-col-row posn))
          (start-col (car rc))
          (start-row (cdr rc))
-         (box  (ew--box-at start-row start-col)))
+         (ctrl-p (memq 'control (event-modifiers event)))
+         (box  (and ctrl-p (ew--box-at start-row start-col))))
     (if box
         (progn
           (ew--push-undo)
@@ -759,7 +760,6 @@ TO-DIR: to-right, to-left, to-down, to-up
           (if (ew--resize-region-p box start-row start-col)
               (ew--do-resize box start-row start-col)
             (ew--do-move box start-row start-col)))
-      ;; 空白部分: ビューポートパン
       (ew--do-pan start-row start-col))))
 
 (defun ew--do-move (box start-row start-col)
@@ -1212,7 +1212,7 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
   (interactive)
   (message (concat
             "【操作】 "
-            "ドラッグ:移動 右下ドラッグ:リサイズ 空白ドラッグ:パン ダブルクリック:ラベル編集 | "
+            "ドラッグ:パン C-ドラッグ:移動 C-右下ドラッグ:リサイズ ダブルクリック:ラベル編集 | "
             "a:追加 d:削除 e:ラベル | "
             "c:接続 x:接続削除 | "
             "u:undo r:redo | "
@@ -1227,6 +1227,8 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
   (let ((map (make-sparse-keymap)))
     ;; マウス操作
     (define-key map [down-mouse-1] #'ew--mouse-drag)
+    (define-key map [C-down-mouse-1] #'ew--mouse-drag)
+    (define-key map [C-mouse-1] #'ignore)  ;; Buffer Menuポップアップを抑制
     (define-key map [double-mouse-1] #'ew-edit-label-mouse)
     ;; ボックス操作
     (define-key map (kbd "a") #'ew-add-box-interactive)
@@ -1263,7 +1265,10 @@ FROM-SIDE/TO-SIDE は辺の指定 (top/bottom/left/right)。"
   (setq ew--file-name nil)
   (setq ew--actual-border-width nil)  ;; フォント測定をリセット
   ;; 罫線の実表示幅に応じてキャンバスを拡張
-  (setq ew--canvas-cols (if (> (ew--border-h-width) 1) 160 80)))
+  (setq ew--canvas-cols (if (> (ew--border-h-width) 1) 160 80))
+  ;; C-down-mouse-1 のグローバルバインド(mouse-buffer-menu)を確実に上書き
+  (local-set-key [C-down-mouse-1] #'ew--mouse-drag)
+  (local-set-key [C-mouse-1] #'ignore))
 
 ;;;; ============================================================
 ;;;; エントリポイント
